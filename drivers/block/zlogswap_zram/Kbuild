@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Isolate exported symbols at compile time while keeping copied C/header files
+# byte-identical to the original zram implementation.
+ccflags-y += -Dzcomp_register=zlogswap_zcomp_register
+ccflags-y += -Dzcomp_unregister=zlogswap_zcomp_unregister
+ccflags-y += -Dzcomp_copy_buffer=zlogswap_zcomp_copy_buffer
+
+zlogswap_zram-y := zcomp.o zram_drv.o
+zlogswap_zcomp_cpu-y := zcomp_cpu.o
+zlogswap_zcomp_eh-y := zcomp_eh.o
+
+obj-$(CONFIG_ZLOGSWAP_ZRAM) += zlogswap_zram.o
+obj-$(CONFIG_ZLOGSWAP_ZCOMP_CPU) += zlogswap_zcomp_cpu.o
+obj-$(CONFIG_ZLOGSWAP_ZCOMP_EH) += zlogswap_zcomp_eh.o
