@@ -8,6 +8,8 @@
 
 #include "zcomp.h"
 
+static enum cpuhp_state zlogswap_cpuhp_state;
+
 static const char * const backends[] = {
 #if IS_ENABLED(CONFIG_CRYPTO_LZO)
 	"lzo",
@@ -142,7 +144,7 @@ int zcomp_cpu_create(struct zcomp *comp, const char *name)
 	if (!comp->private)
 		return -ENOMEM;
 
-	ret = cpuhp_state_add_instance(CPUHP_ZCOMP_PREPARE, &comp->node);
+	ret = cpuhp_state_add_instance(zlogswap_cpuhp_state, &comp->node);
 	if (ret < 0)
 		goto cleanup;
 
@@ -155,7 +157,7 @@ cleanup:
 
 void zcomp_cpu_destroy(struct zcomp *comp)
 {
-	cpuhp_state_remove_instance(CPUHP_ZCOMP_PREPARE, &comp->node);
+	cpuhp_state_remove_instance(zlogswap_cpuhp_state, &comp->node);
 	free_percpu(comp->private);
 	module_put(THIS_MODULE);
 }
@@ -203,13 +205,14 @@ static int __init zcomp_cpu_init(void)
 			goto out;
 	}
 
-	ret = cpuhp_setup_state_multi(CPUHP_ZCOMP_PREPARE,
-			"block/zram/zcomp/cpu:prepare",
+	ret = cpuhp_setup_state_multi(CPUHP_BP_PREPARE_DYN,
+			"block/zlogswap_zram/zcomp/cpu:prepare",
 			zcomp_cpu_up_prepare, zcomp_cpu_dead);
-	if (ret)
+	if (ret < 0)
 		goto out;
+	zlogswap_cpuhp_state = ret;
 
-	return ret;
+	return 0;
 
 out:
 	for (i = i - 1; i >= 0; i--)
@@ -225,7 +228,7 @@ static void __exit zcomp_cpu_exit(void)
 	for (i = 0; i < ARRAY_SIZE(backends); i++)
 		zcomp_unregister(backends[i]);
 
-	cpuhp_remove_multi_state(CPUHP_ZCOMP_PREPARE);
+	cpuhp_remove_multi_state(zlogswap_cpuhp_state);
 }
 
 module_init(zcomp_cpu_init);

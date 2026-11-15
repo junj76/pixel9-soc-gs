@@ -12,7 +12,7 @@
  *
  */
 
-#define KMSG_COMPONENT "zram"
+#define KMSG_COMPONENT "zlogswap_zram"
 #define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
 
 #include <linux/module.h>
@@ -38,7 +38,7 @@
 #include "zram_drv.h"
 
 #undef CREATE_TRACE_POINTS
-#include <trace/events/zram.h>
+#include <trace/events/zlogswap_zram.h>
 
 #include "zcomp.h"
 
@@ -848,7 +848,7 @@ static int read_from_bdev(struct zram *zram, struct bio_vec *bvec,
 			unsigned long entry, struct bio *parent, bool sync)
 {
 	this_cpu_inc(zram->pcp_stats->items[NR_BD_READ]);
-	trace_zram_read_from_bdev(zram, entry);
+	trace_zlogswap_zram_read_from_bdev(zram, entry);
 	if (sync)
 		return read_from_bdev_sync(zram, bvec, entry, parent);
 	else
@@ -871,7 +871,7 @@ static struct dentry *zram_debugfs_root;
 
 static void zram_debugfs_create(void)
 {
-	zram_debugfs_root = debugfs_create_dir("zram", NULL);
+	zram_debugfs_root = debugfs_create_dir("zlogswap_zram", NULL);
 }
 
 static void zram_debugfs_destroy(void)
@@ -1645,6 +1645,9 @@ static void zram_reset_device(struct zram *zram)
 	zcomp_destroy(zram->comp);
 	zram->comp = NULL;
 	reset_bdev(zram);
+#ifdef ZLOGSWAP
+	zlogswap_unbind(zram);
+#endif
 
 	up_write(&zram->init_lock);
 }
@@ -1774,6 +1777,10 @@ static DEVICE_ATTR_WO(writeback);
 static DEVICE_ATTR_RW(writeback_limit);
 static DEVICE_ATTR_RW(writeback_limit_enable);
 #endif
+#ifdef ZLOGSWAP
+static DEVICE_ATTR_RW(zlogswap_loop_device);
+#endif
+
 
 static struct attribute *zram_disk_attrs[] = {
 	&dev_attr_disksize.attr,
@@ -1790,6 +1797,9 @@ static struct attribute *zram_disk_attrs[] = {
 	&dev_attr_writeback.attr,
 	&dev_attr_writeback_limit.attr,
 	&dev_attr_writeback_limit_enable.attr,
+#endif
+#ifdef ZLOGSWAP
+	&dev_attr_zlogswap_loop_device.attr,
 #endif
 	&dev_attr_io_stat.attr,
 	&dev_attr_mm_stat.attr,
@@ -1846,7 +1856,7 @@ static int zram_add(void)
 	zram->disk->flags |= GENHD_FL_NO_PART;
 	zram->disk->fops = &zram_devops;
 	zram->disk->private_data = zram;
-	snprintf(zram->disk->disk_name, 16, "zram%d", device_id);
+	snprintf(zram->disk->disk_name, sizeof(zram->disk->disk_name), "zlogswap_zram%d", device_id);
 
 	/* Actual capacity set using syfs (/sys/block/zram<id>/disksize */
 	set_capacity(zram->disk, 0);
@@ -2012,7 +2022,7 @@ static struct attribute *zram_control_class_attrs[] = {
 ATTRIBUTE_GROUPS(zram_control_class);
 
 static struct class zram_control_class = {
-	.name		= "zram-control",
+	.name		= "zlogswap_zram-control",
 	.owner		= THIS_MODULE,
 	.class_groups	= zram_control_class_groups,
 };
@@ -2029,7 +2039,7 @@ static void destroy_devices(void)
 	idr_for_each(&zram_index_idr, &zram_remove_cb, NULL);
 	zram_debugfs_destroy();
 	idr_destroy(&zram_index_idr);
-	unregister_blkdev(zram_major, "zram");
+	unregister_blkdev(zram_major, "zlogswap_zram");
 }
 
 static int zram_meminfo_cb(int id, void *ptr, void *data)
@@ -2058,7 +2068,7 @@ static unsigned long zram_meminfo_size(void *private)
 }
 
 static struct meminfo zram_meminfo = {
-	.name = "Zram",
+	.name = "ZlogswapZram",
 	.size_kb = zram_meminfo_size,
 };
 
@@ -2075,7 +2085,7 @@ static int __init zram_init(void)
 	}
 
 	zram_debugfs_create();
-	zram_major = register_blkdev(0, "zram");
+	zram_major = register_blkdev(0, "zlogswap_zram");
 	if (zram_major <= 0) {
 		pr_err("Unable to get major number\n");
 		class_unregister(&zram_control_class);
@@ -2102,6 +2112,7 @@ out_error:
 
 static void __exit zram_exit(void)
 {
+	unregister_meminfo(&zram_meminfo);
 	destroy_devices();
 }
 

@@ -5,7 +5,7 @@ ccflags-y += -Dzcomp_register=zlogswap_zcomp_register
 ccflags-y += -Dzcomp_unregister=zlogswap_zcomp_unregister
 ccflags-y += -Dzcomp_copy_buffer=zlogswap_zcomp_copy_buffer
 
-zlogswap_zram-y := zcomp.o zram_drv.o
+zlogswap_zram-y := zcomp.o zram_drv.o zlogswap.o
 zlogswap_zcomp_cpu-y := zcomp_cpu.o
 zlogswap_zcomp_eh-y := zcomp_eh.o
 

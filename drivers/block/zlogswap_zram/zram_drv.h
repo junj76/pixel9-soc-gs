@@ -19,6 +19,8 @@
 #include <linux/zsmalloc.h>
 #include <linux/crypto.h>
 
+#include "./zlogswap.h"
+
 #define SECTORS_PER_PAGE_SHIFT	(PAGE_SHIFT - SECTOR_SHIFT)
 #define SECTORS_PER_PAGE	(1 << SECTORS_PER_PAGE_SHIFT)
 #define ZRAM_LOGICAL_BLOCK_SHIFT 12
@@ -127,6 +129,12 @@ struct zram {
 #endif
 #ifdef CONFIG_ZRAM_MEMORY_TRACKING
 	struct dentry *debugfs_dir;
+#endif
+#ifdef ZLOGSWAP
+	struct zlogswap *zlogswap;
+	struct file *zlogswap_backing_dev;
+	struct block_device *zlogswap_bdev;
+	unsigned long zlogswap_bdev_nr_pages;
 #endif
 };
 
