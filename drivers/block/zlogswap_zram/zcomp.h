@@ -25,6 +25,7 @@ struct zcomp_cookie {
 	u32 index; /* requested page-sized block index in zram block */
 	struct page *page; /* requested page for compression */
 	struct bio *bio;
+	struct mem_cgroup *memcg; /* Original write owner; async cookies hold a ref. */
 	struct list_head list; /* list for page pool at idle */
 			       /* list for pended io at active */
 };
@@ -66,7 +67,7 @@ struct zcomp *zcomp_create(const char *comp, struct zram *zram);
 void zcomp_destroy(struct zcomp *comp);
 
 int zcomp_compress(struct zcomp *comp, u32 index, struct page *page,
-			struct bio *bio);
+			struct bio *bio, struct mem_cgroup *memcg);
 int zcomp_decompress(struct zcomp *comp, u32 index, struct page *page);
 
 int zcomp_register(const char *algo_name, const struct zcomp_operation *operation);

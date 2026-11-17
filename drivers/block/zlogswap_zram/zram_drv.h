@@ -142,7 +142,7 @@ struct zram {
 void zram_slot_lock(struct zram *zram, u32 index);
 void zram_slot_unlock(struct zram *zram, u32 index);
 void zram_slot_update(struct zram *zram, u32 index, unsigned long handle,
-			unsigned int comp_len);
+			unsigned int comp_len, struct mem_cgroup *memcg);
 
 unsigned long zram_get_handle(struct zram *zram, u32 index);
 size_t zram_get_obj_size(struct zram *zram, u32 index);

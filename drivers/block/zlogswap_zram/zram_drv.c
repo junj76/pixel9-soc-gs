@@ -1196,7 +1196,8 @@ static bool zram_meta_alloc(struct zram *zram, u64 disksize)
 }
 
 void zram_slot_update(struct zram *zram, u32 index,
-		unsigned long handle, unsigned int comp_len)
+		unsigned long handle, unsigned int comp_len,
+		struct mem_cgroup *memcg)
 {
 	unsigned long alloced_pages;
 
@@ -1223,6 +1224,11 @@ void zram_slot_update(struct zram *zram, u32 index,
 		zram_set_obj_size(zram, index, comp_len);
 	}
 	zram_accessed(zram, index);
+#ifdef ZLOGSWAP
+	if (comp_len) {
+		zlogswap_track(zram, index, memcg);
+	}
+#endif
 	zram_slot_unlock(zram, index);
 	if (comp_len) {
 		this_cpu_add(zram->pcp_stats->items[COMPRESSED_SIZE], comp_len);
@@ -1350,7 +1356,8 @@ out:
 }
 
 static int __zram_bvec_write(struct zram *zram, struct bio_vec *bvec,
-				u32 index, struct bio *bio)
+				u32 index, struct bio *bio,
+				struct mem_cgroup *memcg)
 {
 	struct page *page = bvec->bv_page;
 
@@ -1358,7 +1365,7 @@ static int __zram_bvec_write(struct zram *zram, struct bio_vec *bvec,
 			zs_get_total_pages(zram->mem_pool) > zram->limit_pages)
 		return -ENOMEM;
 
-	return zcomp_compress(zram->comp, index, page, bio);
+	return zcomp_compress(zram->comp, index, page, bio, memcg);
 }
 
 static int zram_bvec_write(struct zram *zram, struct bio_vec *bvec,
@@ -1366,7 +1373,15 @@ static int zram_bvec_write(struct zram *zram, struct bio_vec *bvec,
 {
 	int ret;
 	struct page *page = NULL;
+	struct mem_cgroup *memcg;
 	struct bio_vec vec;
+
+	/* Preserve the original write owner before using a temporary page. */
+	rcu_read_lock();
+	memcg = folio_memcg_rcu(page_folio(bvec->bv_page));
+	if (!mem_cgroup_tryget(memcg))
+		memcg = NULL;
+	rcu_read_unlock();
 
 	vec = *bvec;
 	if (is_partial_io(bvec)) {
@@ -1376,8 +1391,10 @@ static int zram_bvec_write(struct zram *zram, struct bio_vec *bvec,
 		 * before to write the changes.
 		 */
 		page = alloc_page(GFP_NOIO|__GFP_HIGHMEM);
-		if (!page)
-			return -ENOMEM;
+		if (!page) {
+			ret = -ENOMEM;
+			goto out;
+		}
 
 		ret = __zram_bvec_read(zram, page, index, bio, true, true);
 		if (ret)
@@ -1392,10 +1409,11 @@ static int zram_bvec_write(struct zram *zram, struct bio_vec *bvec,
 		vec.bv_offset = 0;
 	}
 
-	ret = __zram_bvec_write(zram, &vec, index, bio);
+	ret = __zram_bvec_write(zram, &vec, index, bio, memcg);
 out:
-	if (is_partial_io(bvec))
+	if (page)
 		__free_page(page);
+	mem_cgroup_put(memcg);
 	return ret;
 }
 

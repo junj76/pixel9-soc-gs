@@ -288,8 +288,7 @@ static int flush_pending_io(struct zcomp *comp)
 		cookie = list_last_entry(&req_list, struct zcomp_cookie, list);
 		list_del(&cookie->list);
 		if (comp->op->compress_async(comp, cookie->page, cookie)) {
-			if (cookie->bio)
-				bio_io_error(cookie->bio);
+			zcomp_copy_buffer(-EIO, NULL, 0, cookie);
 			err = -EIO;
 		}
 	}
@@ -327,7 +326,7 @@ static unsigned long nr_pend_request(struct zcomp *comp)
 }
 
 int zcomp_compress(struct zcomp *comp, u32 index, struct page *page,
-			struct bio *bio)
+			struct bio *bio, struct mem_cgroup *memcg)
 {
 	/*
 	 * Async IO should return 1 instead of 0 to indicate
@@ -339,7 +338,7 @@ int zcomp_compress(struct zcomp *comp, u32 index, struct page *page,
 	struct zcomp_cookie *cookie;
 
 	if (zcomp_page_same_pattern(page, &element)) {
-		zram_slot_update(comp->zram, index, element, 0);
+		zram_slot_update(comp->zram, index, element, 0, NULL);
 		return 0;
 	}
 
@@ -351,6 +350,7 @@ int zcomp_compress(struct zcomp *comp, u32 index, struct page *page,
 		cookie->index = index;
 		cookie->page = page;
 		cookie->bio = bio;
+		cookie->memcg = memcg;
 
 		return comp->op->compress(comp, page, cookie);
 	}
@@ -363,6 +363,13 @@ int zcomp_compress(struct zcomp *comp, u32 index, struct page *page,
 	cookie->index = index;
 	cookie->page = page;
 	cookie->bio = bio;
+	/* Keep both original ownership and compression input alive until completion. */
+	if (!mem_cgroup_tryget(memcg)) {
+		free_zcomp_cookie(comp, cookie);
+		return -ENODEV;
+	}
+	cookie->memcg = memcg;
+	get_page(page);
 	/*
 	 * Since __zram_make_request has bio_endio, zcomp_async needs
 	 * to hold the bio completion until the IO request is done if
@@ -381,8 +388,12 @@ int zcomp_compress(struct zcomp *comp, u32 index, struct page *page,
 	} else {
 		flush_pending_io(comp);
 		if (comp->op->compress_async(comp, page, cookie)) {
-			if (cookie->bio)
-				bio_io_error(cookie->bio);
+			/* Rejected requests remain the caller's completion responsibility. */
+			mem_cgroup_put(cookie->memcg);
+			put_page(page);
+			free_zcomp_cookie(comp, cookie);
+			if (bio)
+				bio_io_error(bio);
 			ret = -EIO;
 		}
 	}
@@ -521,16 +532,19 @@ int zcomp_copy_buffer(int err, void *buffer, int comp_len,
 		memcpy(dst_addr, buffer, comp_len);
 	}
 	zs_unmap_object(zram->mem_pool, handle);
-	zram_slot_update(zram, index, handle, comp_len);
+	zram_slot_update(zram, index, handle, comp_len, cookie->memcg);
 out:
 	if (zcomp_async(zram->comp)) {
+		mem_cgroup_put(cookie->memcg);
+		/* Recycle the cookie before endio can release the device user. */
+		free_zcomp_cookie(zram->comp, cookie);
 		if (!bio) { /* rw_page case */
 			zram_page_write_endio(zram, page, err);
 		} else {
 			zram_bio_endio(zram, bio, true, err);
 		}
 
-		free_zcomp_cookie(zram->comp, cookie);
+		put_page(page);
 	}
 
 	return err;
