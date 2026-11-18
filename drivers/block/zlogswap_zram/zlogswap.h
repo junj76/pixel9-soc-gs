@@ -4,6 +4,7 @@
 #include <linux/device.h>
 #include <linux/printk.h>
 #include <linux/memcontrol.h>
+#include <linux/pid.h>
 
 #define ZLOGSWAP
 #define EXTENT_SHIFT 15
@@ -105,6 +106,7 @@ struct zlogswap {
 	int nr_objs;
 	int nr_exts;
 	int nr_mcgs;
+	u64 gen; /* bumped on every bind; invalidates stale per-memcg state */
 
 	unsigned long *bitmap;
 	atomic_t last_alloc_bit;
@@ -118,28 +120,70 @@ struct zlogswap {
 
 	atomic_t stored_exts;
 	atomic_t *ext_stored_pages;
+	/* Order: slot (if held) -> extent_lock -> list head -> node. */
+	spinlock_t extent_lock;
 
 	spinlock_t *zlogswap_memcg_init_lock; // lock for zlgoswap_memcg alloc and init
-
-	atomic_t initialized;
 };
 
 struct zram;
 
+/*
+ * Extent lifecycle only: no I/O, slot updates or rmap movement.
+ * Caller keeps the backend, owner memcg, ID mapping and extension alive.
+ * Use these APIs for ALL extent bitmap/priv/count changes.
+ *
+ * alloc/get return ext_id with exclusive ownership (priv=0).
+ * get returns -EBUSY when already owned; unallocated IDs return -ENOENT.
+ * put publishes a nonempty extent, or frees an empty one.
+ * free accepts only an owned, empty extent with empty rmap.
+ *
+ * add_obj is owner-only, after installing an rmap member; del_obj is called
+ * after removing an rmap member. A busy extent's last deletion is finalized
+ * by its owner's put. Slot locks protect the mapping/count pairing.
+ * These APIs do not verify the caller's identity: exclusive ownership is
+ * a caller contract, not a reference count. Do not pass stale extent IDs.
+ * Do not call with list/node locks held; never take a slot lock from here.
+ */
+int zlogswap_alloc_extent(struct zram *zram, struct mem_cgroup *memcg);
+int zlogswap_get_extent(struct zram *zram, struct mem_cgroup *memcg, int ext_id);
+int zlogswap_put_extent(struct zram *zram, struct mem_cgroup *memcg, int ext_id);
+int zlogswap_free_extent(struct zram *zram, struct mem_cgroup *memcg, int ext_id);
+int zlogswap_extent_add_obj(struct zram *zram, struct mem_cgroup *memcg, int ext_id);
+int zlogswap_extent_del_obj(struct zram *zram, struct mem_cgroup *memcg, int ext_id);
+
 extern void zlogswap_unbind(struct zram *zram);
+int zlogswap_init_completion_wq(void);
+void zlogswap_destroy_completion_wq(void);
+int zlogswap_register_hooks(void);
+void zlogswap_unregister_hooks(void);
+void zlogswap_untrack(struct zram *zram, u32 index);
+int zlogswap_read_extent(struct zram *zram, u32 index);
 extern void zlogswap_track(struct zram *zram, u32 index, struct mem_cgroup *memcg);
 
 extern ssize_t zlogswap_loop_device_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t len);
 extern ssize_t zlogswap_loop_device_show(struct device *dev,
 		struct device_attribute *attr, char *buf);
+extern ssize_t zlogswap_promote_pid_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t len);
+extern ssize_t zlogswap_flush_pid_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t len);
 
 struct mem_cgroup_zlogswap {
+	u16 mcg_id;
+	u64 gen; /* zlogswap->gen this owner was initialized for */
 	struct zram *zram;
 	struct mem_cgroup *memcg;
 	unsigned long zram_lru;
 	unsigned long ext_lru;
 
+	atomic64_t zram_stored_size; // in Bytes
+	atomic64_t zram_page_cnt; // nr_pages
+	atomic64_t zlogswap_stored_size;
+	atomic64_t zlogswap_page_cnt;
+
+	struct mutex swap_lock;
 	bool initialized;
 };
 

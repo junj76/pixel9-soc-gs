@@ -50,6 +50,12 @@ enum zram_pageflags {
 	ZRAM_HUGE,	/* Incompressible page */
 	ZRAM_IDLE,	/* not accessed page since last idle marking */
 
+#ifdef ZLOGSWAP
+	ZRAM_ZLOGSWAP_UNDER_FLUSH,
+	ZRAM_ZLOGSWAP_FLUSH_VALID,
+	ZRAM_ZLOGSWAP_FLUSHED,
+#endif
+
 	__NR_ZRAM_PAGEFLAGS,
 };
 
@@ -145,9 +151,13 @@ void zram_slot_update(struct zram *zram, u32 index, unsigned long handle,
 			unsigned int comp_len, struct mem_cgroup *memcg);
 
 unsigned long zram_get_handle(struct zram *zram, u32 index);
+void zram_set_handle(struct zram *zram, u32 index, unsigned long handle);
 size_t zram_get_obj_size(struct zram *zram, u32 index);
+void zram_set_obj_size(struct zram *zram, u32 index, size_t size);
 unsigned long zram_get_element(struct zram *zram, u32 index);
 bool zram_test_flag(struct zram *zram, u32 index, enum zram_pageflags flag);
+void zram_set_flag(struct zram *zram, u32 index, enum zram_pageflags flag);
+void zram_clear_flag(struct zram *zram, u32 index, enum zram_pageflags flag);
 
 struct bio;
 void zram_bio_endio(struct zram *zram, struct bio *bio, bool is_write, int err);

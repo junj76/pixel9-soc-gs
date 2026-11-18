@@ -89,7 +89,7 @@ unsigned long zram_get_handle(struct zram *zram, u32 index)
 	return zram->table[index].handle;
 }
 
-static void zram_set_handle(struct zram *zram, u32 index, unsigned long handle)
+void zram_set_handle(struct zram *zram, u32 index, unsigned long handle)
 {
 	zram->table[index].handle = handle;
 }
@@ -101,13 +101,13 @@ bool zram_test_flag(struct zram *zram, u32 index,
 	return zram->table[index].flags & BIT(flag);
 }
 
-static void zram_set_flag(struct zram *zram, u32 index,
+void zram_set_flag(struct zram *zram, u32 index,
 			enum zram_pageflags flag)
 {
 	zram->table[index].flags |= BIT(flag);
 }
 
-static void zram_clear_flag(struct zram *zram, u32 index,
+void zram_clear_flag(struct zram *zram, u32 index,
 			enum zram_pageflags flag)
 {
 	zram->table[index].flags &= ~BIT(flag);
@@ -129,7 +129,7 @@ size_t zram_get_obj_size(struct zram *zram, u32 index)
 	return zram->table[index].flags & (BIT(ZRAM_FLAG_SHIFT) - 1);
 }
 
-static void zram_set_obj_size(struct zram *zram,
+void zram_set_obj_size(struct zram *zram,
 					u32 index, size_t size)
 {
 	unsigned long flags = zram->table[index].flags >> ZRAM_FLAG_SHIFT;
@@ -706,6 +706,11 @@ static ssize_t writeback_store(struct device *dev,
 				zram_test_flag(zram, index, ZRAM_SAME) ||
 				zram_test_flag(zram, index, ZRAM_UNDER_WB))
 			goto next;
+#ifdef ZLOGSWAP
+		if (zram_test_flag(zram, index, ZRAM_ZLOGSWAP_UNDER_FLUSH) ||
+		    zram_test_flag(zram, index, ZRAM_ZLOGSWAP_FLUSHED))
+			goto next;
+#endif
 
 		if (mode & IDLE_WRITEBACK &&
 			  !zram_test_flag(zram, index, ZRAM_IDLE))
@@ -1246,6 +1251,12 @@ static void zram_free_page(struct zram *zram, size_t index)
 {
 	unsigned long handle;
 
+#ifdef ZLOGSWAP
+	/* Cancel this object, but leave UNDER_FLUSH to the flush owner. */
+	zram_clear_flag(zram, index, ZRAM_ZLOGSWAP_FLUSH_VALID);
+	zlogswap_untrack(zram, index);
+#endif
+
 #ifdef CONFIG_ZRAM_MEMORY_TRACKING
 	zram->table[index].ac_time = 0;
 #endif
@@ -1256,6 +1267,13 @@ static void zram_free_page(struct zram *zram, size_t index)
 		zram_clear_flag(zram, index, ZRAM_HUGE);
 		__this_cpu_dec(zram->pcp_stats->items[NR_HUGE_PAGE]);
 	}
+
+#ifdef ZLOGSWAP
+	if (zram_test_flag(zram, index, ZRAM_ZLOGSWAP_FLUSHED)) {
+		zram_clear_flag(zram, index, ZRAM_ZLOGSWAP_FLUSHED);
+		goto out;
+	}
+#endif
 
 	if (zram_test_flag(zram, index, ZRAM_WB)) {
 		zram_clear_flag(zram, index, ZRAM_WB);
@@ -1285,7 +1303,11 @@ out:
 	zram_set_handle(zram, index, 0);
 	zram_set_obj_size(zram, index, 0);
 	WARN_ON_ONCE(zram->table[index].flags &
-		~(1UL << ZRAM_LOCK | 1UL << ZRAM_UNDER_WB));
+		~(1UL << ZRAM_LOCK | 1UL << ZRAM_UNDER_WB
+#ifdef ZLOGSWAP
+		  | 1UL << ZRAM_ZLOGSWAP_UNDER_FLUSH
+#endif
+		  ));
 }
 
 static int __zram_bvec_read(struct zram *zram, struct page *page, u32 index,
@@ -1293,7 +1315,19 @@ static int __zram_bvec_read(struct zram *zram, struct page *page, u32 index,
 {
 	int ret;
 
+#ifdef ZLOGSWAP
+retry:
+#endif
 	zram_slot_lock(zram, index);
+#ifdef ZLOGSWAP
+	if (zram_test_flag(zram, index, ZRAM_ZLOGSWAP_FLUSHED)) {
+		zram_slot_unlock(zram, index);
+		ret = zlogswap_read_extent(zram, index);
+		if (ret)
+			return ret;
+		goto retry;
+	}
+#endif
 	if (access)
 		zram_accessed(zram, index);
 	if (zram_test_flag(zram, index, ZRAM_WB)) {
@@ -1797,6 +1831,8 @@ static DEVICE_ATTR_RW(writeback_limit_enable);
 #endif
 #ifdef ZLOGSWAP
 static DEVICE_ATTR_RW(zlogswap_loop_device);
+static DEVICE_ATTR_WO(zlogswap_flush_pid);
+static DEVICE_ATTR_WO(zlogswap_promote_pid);
 #endif
 
 
@@ -1818,6 +1854,8 @@ static struct attribute *zram_disk_attrs[] = {
 #endif
 #ifdef ZLOGSWAP
 	&dev_attr_zlogswap_loop_device.attr,
+	&dev_attr_zlogswap_flush_pid.attr,
+	&dev_attr_zlogswap_promote_pid.attr,
 #endif
 	&dev_attr_io_stat.attr,
 	&dev_attr_mm_stat.attr,
@@ -2096,9 +2134,18 @@ static int __init zram_init(void)
 
 	BUILD_BUG_ON(__NR_ZRAM_PAGEFLAGS > BITS_PER_LONG);
 
+#ifdef ZLOGSWAP
+	ret = zlogswap_init_completion_wq();
+	if (ret)
+		return ret;
+#endif
+
 	ret = class_register(&zram_control_class);
 	if (ret) {
 		pr_err("Unable to register zram-control class\n");
+#ifdef ZLOGSWAP
+		zlogswap_destroy_completion_wq();
+#endif
 		return ret;
 	}
 
@@ -2107,6 +2154,9 @@ static int __init zram_init(void)
 	if (zram_major <= 0) {
 		pr_err("Unable to get major number\n");
 		class_unregister(&zram_control_class);
+#ifdef ZLOGSWAP
+		zlogswap_destroy_completion_wq();
+#endif
 		return -EBUSY;
 	}
 
@@ -2121,17 +2171,35 @@ static int __init zram_init(void)
 
 	register_meminfo(&zram_meminfo);
 
+#ifdef ZLOGSWAP
+	ret = zlogswap_register_hooks();
+	if (ret) {
+		pr_err("zlogswap: register memcg hooks failed: %d\n", ret);
+		unregister_meminfo(&zram_meminfo);
+		goto out_error;
+	}
+#endif
+
 	return 0;
 
 out_error:
 	destroy_devices();
+#ifdef ZLOGSWAP
+	zlogswap_destroy_completion_wq();
+#endif
 	return ret;
 }
 
 static void __exit zram_exit(void)
 {
+#ifdef ZLOGSWAP
+	zlogswap_unregister_hooks();
+#endif
 	unregister_meminfo(&zram_meminfo);
 	destroy_devices();
+#ifdef ZLOGSWAP
+	zlogswap_destroy_completion_wq();
+#endif
 }
 
 module_init(zram_init);
